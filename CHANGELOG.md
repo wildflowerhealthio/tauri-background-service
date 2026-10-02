@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **iOS:** `ServiceManagerHandle::start` (the Rust API) now wires the
+  service to the iOS lifecycle the same way the `start` command does — the
+  `completeBgTask` callback before `Start`, the cancel listener after it.
+  Before, a service started from Rust had no cancel listener, so neither a
+  BGTask expiration nor the background grace window could stop it.
 - **Android:** the foreground service now runs without a host native core.
   When `HeadlessBridge.nativeLibName` cannot be loaded, a start made by the
   plugin itself (`manual_start`) is accepted as lifecycle-only
