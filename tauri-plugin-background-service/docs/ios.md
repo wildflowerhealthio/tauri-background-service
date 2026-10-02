@@ -53,6 +53,9 @@ The following diagram shows the complete lifecycle from background transition th
 │  Plugin detects desired_running=true, no active BGTask   │
 │  → scheduleNext() submits BGAppRefreshTaskRequest        │
 │                    + BGProcessingTaskRequest              │
+│  Service running in-process → opens a grace window      │
+│  (UIKit background task); ~5s before it runs out the    │
+│  service is stopped with platformExpiration             │
 └─────────────────┬───────────────────────────────────────┘
                   │ iOS decides to launch (minutes/hours later)
                   ▼
@@ -114,10 +117,22 @@ The plugin observes `UIApplication.didEnterBackgroundNotification` and `UIApplic
 
 | Transition | Behavior |
 |------------|----------|
-| **Foreground → Background** | If `ios_desired_running == true` and no BGTask is currently active, the plugin calls `scheduleNext()` to submit both `BGAppRefreshTaskRequest` and `BGProcessingTaskRequest`. This ensures iOS has scheduled tasks that may relaunch the app. |
-| **Background → Foreground** | The plugin reschedules. If `ios_desired_running == true` and no BGTask is currently active, the foreground transition calls `scheduleNext()` to re-arm both requests (the same path as the background transition), so iOS keeps an eligible pending request after the app returns to the foreground. |
+| **Foreground → Background** | If `ios_desired_running == true` and no BGTask is currently active, the plugin calls `scheduleNext()` to submit both `BGAppRefreshTaskRequest` and `BGProcessingTaskRequest`. This ensures iOS has scheduled tasks that may relaunch the app. If the service is running in-process and no BGTask is active, the plugin also opens a [grace window](#background-grace-window). |
+| **Background → Foreground** | Any open grace window is ended; a service still running keeps running. The plugin reschedules. If `ios_desired_running == true` and no BGTask is currently active, the foreground transition calls `scheduleNext()` to re-arm both requests (the same path as the background transition), so iOS keeps an eligible pending request after the app returns to the foreground. |
 
 When the app transitions to the background with `desired_running=true`, the scheduling ensures iOS can potentially relaunch the app for a background task. When iOS does relaunch the app, the pending task bridge (described above) auto-starts the Rust service.
+
+### Background Grace Window
+
+A backgrounded app gets a short grace period before iOS suspends it. Without a background task iOS suspends the process silently, freezing a running service mid-flight with no stop event. To avoid that, when the app enters the background with the service running in-process and no BGTask active, the plugin begins a UIKit background task (`beginBackgroundTask(withName:expirationHandler:)`) — the grace window:
+
+1. On opening the window, the plugin schedules a timer for `backgroundTimeRemaining` minus a 5-second margin (30 seconds is assumed when UIKit reports no usable value).
+2. When the timer fires, the plugin resolves the pending `waitForCancel` invoke. Rust stops the service with `StopReason::PlatformExpiration`: the `stopped` event is emitted with reason `platformExpiration`, the `notifyOnTimeout` notification is posted (when enabled), `desired_running` is kept, and the scheduled BGTasks stay in place.
+3. The background task ends when the service has finished stopping (`completeBgTask`), or at the latest in the expiration handler, which also resolves the invoke if the timer has not.
+
+The grace window also ends — without stopping the service — when the app returns to the foreground, and it is handed over when a BGTask launches (the BGTask's expiration handler and safety timer then own the lifecycle). An explicit `stopService()` ends it too. At most one grace window is open at a time.
+
+After a grace-window stop the service stays stopped until a BGTask launches it again (warm delivery or cold auto-start) or the app starts it, for example on returning to the foreground.
 
 ## Foreground vs Background Behavior
 
@@ -127,7 +142,7 @@ When the app is in the foreground, the service runs **continuously** with no tim
 
 ### Background (App Suspended)
 
-When the app moves to the background, iOS gives you **short execution windows** (typically ~30 seconds) controlled by `BGAppRefreshTask`. Between these windows, your app is suspended and receives no CPU time.
+When the app moves to the background, a service that was running in the foreground keeps running for the [grace window](#background-grace-window) and is then stopped with `platformExpiration` before iOS suspends the app. After that, iOS gives you **short execution windows** (typically ~30 seconds) controlled by `BGAppRefreshTask`. Between these windows, your app is suspended and receives no CPU time.
 
 Key constraints:
 - **Execution window**: ~30 seconds per background task (the plugin uses a 28.0s safety timeout by default)
@@ -258,7 +273,7 @@ iOS cancellation uses the **Pending Invoke pattern**:
 
 1. When a `BGAppRefreshTask` starts, the plugin stores the task reference and sets an expiration handler.
 2. The Rust side spawns a `spawn_blocking` thread that calls `waitForCancel()`. This stores an `Invoke` object without resolving it, which blocks the thread.
-3. When iOS fires the expiration handler (system is about to suspend the task):
+3. When iOS fires the expiration handler (system is about to suspend the task) — or, for a service running when the app was backgrounded, when the [grace window](#background-grace-window) is about to run out:
    - The stored invoke is **resolved** (unblocking the Rust thread)
    - Rust receives the signal and calls `stop()`
    - The `on_complete` callback fires `completeBgTask(success: false)` on the Swift side
@@ -511,6 +526,7 @@ po BGTaskScheduler.shared.pendingTaskRequests()
 
 **Service runs in foreground but not in background:**
 - This is expected behavior. iOS limits background execution to ~30 seconds
+- A service running when the app is backgrounded is stopped with `platformExpiration` a few seconds before the grace window runs out
 - The expiration handler fires, service is cancelled, and next task is scheduled
 - Check that `iosSafetyTimeoutSecs` is set appropriately (default 28.0)
 
