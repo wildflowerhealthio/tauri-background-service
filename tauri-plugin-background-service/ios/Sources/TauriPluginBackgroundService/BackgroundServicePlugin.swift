@@ -108,6 +108,12 @@ import Tauri
     /// fixed value to drive the foreground ring gate without a real app lifecycle.
     var appIsForeground: () -> Bool = { UIApplication.shared.applicationState == .active }
 
+    /// UIKit background-task seam (grace window). Defaults to the real
+    /// `UIApplication.shared` wrapper; XCTest injects a recording fake so the
+    /// grace window's begin/end pairing and expiration are provable without a
+    /// real app lifecycle. See `Seams.swift`.
+    var backgroundTime: BackgroundTimeProviding = SystemBackgroundTimeProvider()
+
     /// At-most-once guard for the deferred notification-authorization request (M4).
     /// Set the first time `requestNotificationAuthorizationIfNeeded()` runs so a
     /// repeated service start doesn't re-prompt within the process lifetime.
@@ -181,6 +187,22 @@ import Tauri
     /// `earliestProcessingBeginMinutes * processingCeilingMultiplier`.
     private var processingCeilingMultiplier: Double = 4.0
 
+
+    // MARK: - State for the background grace window
+
+    /// UIKit background task held while the app is backgrounded with the
+    /// in-process service running and no BGTask active, or `.invalid` when no
+    /// grace window is open. See `beginGraceWindowIfNeeded()`.
+    private var graceWindowTaskId: UIBackgroundTaskIdentifier = .invalid
+
+    /// Fires `graceWindowStopMargin` before the grace window's budget runs out
+    /// to stop the service while there is still time to do so gracefully.
+    private var graceWindowTimer: Timer?
+
+    /// Whether a grace window is open. Internal so XCTest can assert it.
+    var isGraceWindowActive: Bool {
+        graceWindowTaskId != .invalid
+    }
 
     /// Whether `setTaskCompleted` has been called for the current BGTask.
     /// Prevents double-completion across all terminal paths (expiration, safety
@@ -395,6 +417,11 @@ import Tauri
     /// leaked observers across tests.
     deinit {
         NotificationCenter.default.removeObserver(self)
+        graceWindowTimer?.invalidate()
+        // Never leak a UIKit background task — iOS terminates apps that do.
+        if graceWindowTaskId != .invalid {
+            backgroundTime.endBackgroundTask(graceWindowTaskId)
+        }
     }
 
     // MARK: - Notification Authorization (M4)
@@ -602,6 +629,8 @@ import Tauri
     // MARK: - BGAppRefreshTask Handler
 
     private func handleBackgroundTask(_ task: BGAppRefreshTask) {
+        // The BGTask (expiration handler + safety timer) now owns the lifecycle.
+        endGraceWindow()
         self.currentRefreshTask = task
         self.taskCompleted = false
 
@@ -628,6 +657,8 @@ import Tauri
     // MARK: - BGProcessingTask Handler
 
     private func handleProcessingTask(_ task: BGProcessingTask) {
+        // The BGTask (expiration handler + safety timer) now owns the lifecycle.
+        endGraceWindow()
         self.currentProcessingTask = task
         self.taskCompleted = false
 
@@ -852,6 +883,11 @@ import Tauri
             // shared guarded finish helper. Avoids scheduling when called after
             // expiration or stop already handled it.
             self.finishRun(success: success)
+
+            // The service has fully stopped (its stop event and any policy
+            // notification are already out), so a grace window has nothing
+            // left to protect — release the background time now.
+            self.endGraceWindow()
 
             // Resolve this invoke
             invoke.resolve()
@@ -1249,6 +1285,7 @@ import Tauri
 
             // Clear remaining state
             self.cleanup()
+            self.endGraceWindow()
 
             invoke.resolve()
         }
@@ -1411,12 +1448,14 @@ import Tauri
     /// if desired_running is true and no BGTask is currently active.
     /// This covers the case where the user started the service in the foreground
     /// and then backgrounds the app — iOS needs scheduled BGTasks to potentially
-    /// relaunch the app later.
+    /// relaunch the app later. If the service is running in-process, a grace
+    /// window is opened so it is stopped gracefully before iOS suspends the app.
     @objc func appDidEnterBackground() {
         let desired = self.defaults.bool(forKey: DesiredStateKeys.desiredRunning)
         if desired && !hasActiveTask {
             scheduleNext()
         }
+        beginGraceWindowIfNeeded()
     }
 
     /// On foreground transition, reconcile recovery state — mirroring
@@ -1425,6 +1464,9 @@ import Tauri
     /// currently running, (re)schedule so iOS can relaunch us later. Any stale
     /// safety timer left by a suspended-then-expired run is cleared first.
     @objc func appWillEnterForeground() {
+        // Back in the foreground the service keeps running; release the grace
+        // window without stopping anything.
+        endGraceWindow()
         let desired = self.defaults.bool(forKey: DesiredStateKeys.desiredRunning)
         guard !hasActiveTask else { return }
         // Clear stale refs/timer from a suspended-then-expired run.
@@ -1433,6 +1475,109 @@ import Tauri
         if desired {
             scheduleNext()
         }
+    }
+
+    // MARK: - Background Grace Window
+
+    /// How long before the grace window's budget runs out the plugin stops the
+    /// service. The expiration handler itself only gets a few seconds and must
+    /// end the task promptly, so the stop is requested this far ahead to give
+    /// Rust time to stop the service, emit the stop event and post the
+    /// timeout notification before iOS suspends the app.
+    static let graceWindowStopMargin: TimeInterval = 5.0
+
+    /// Budget assumed when `backgroundTimeRemaining` reports no usable value
+    /// (non-finite, or `.greatestFiniteMagnitude` while UIKit still considers
+    /// the app active). Matches the ~30 s iOS typically grants a backgrounded app.
+    static let graceWindowFallbackBudget: TimeInterval = 30.0
+
+    /// Name of the UIKit background task, visible in system diagnostics.
+    private static let graceWindowTaskName = "tauri-plugin-background-service.grace-window"
+
+    /// Seconds after opening the grace window at which the service is stopped:
+    /// `timeRemaining - margin`, clamped to ≥ 0. Pure and static so XCTest covers
+    /// the arithmetic without UIKit.
+    static func graceWindowStopDelay(
+        timeRemaining: TimeInterval,
+        margin: TimeInterval = BackgroundServicePlugin.graceWindowStopMargin
+    ) -> TimeInterval {
+        let budget = (timeRemaining.isFinite && timeRemaining < .greatestFiniteMagnitude)
+            ? timeRemaining
+            : graceWindowFallbackBudget
+        return max(0, budget - margin)
+    }
+
+    /// Open a grace window when the app enters the background with the service
+    /// running in-process and no BGTask active.
+    ///
+    /// Without one, iOS suspends the app silently once its background grace
+    /// period ends: the service is frozen mid-flight with no stop event and no
+    /// timeout notification. Holding a UIKit background task lets the plugin
+    /// stop the service first, by resolving the pending cancel invoke — Rust then
+    /// stops it with `PlatformExpiration`, the same graceful path a BGTask
+    /// expiration takes (desired state is kept and BGTasks stay scheduled).
+    ///
+    /// "Running in-process" is `pendingCancelInvoke != nil`: Rust spawns the
+    /// cancel listener after every successful start, and every stop path
+    /// (`stopKeepalive`, `completeBgTask`) answers it.
+    private func beginGraceWindowIfNeeded() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard graceWindowTaskId == .invalid, pendingCancelInvoke != nil, !hasActiveTask else { return }
+
+        let taskId = backgroundTime.beginBackgroundTask(withName: Self.graceWindowTaskName) {
+            [weak self] in
+            self?.handleGraceWindowExpiration()
+        }
+        guard taskId != .invalid else {
+            logger.warning("beginBackgroundTask returned .invalid — no grace window for the running service")
+            return
+        }
+        graceWindowTaskId = taskId
+
+        let delay = Self.graceWindowStopDelay(timeRemaining: backgroundTime.backgroundTimeRemaining)
+        graceWindowTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            self?.handleGraceWindowDeadline()
+        }
+    }
+
+    /// The grace-window timer fired: stop the service while there is still
+    /// budget left. The background task stays open so Rust can finish stopping;
+    /// it is ended by `completeBgTask` (service stopped) or the expiration handler.
+    func handleGraceWindowDeadline() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        graceWindowTimer = nil
+        guard graceWindowTaskId != .invalid else { return }
+        resolvePendingCancelInvoke()
+    }
+
+    /// iOS is about to end the grace window: stop the service if the timer has
+    /// not already, then end the background task immediately.
+    func handleGraceWindowExpiration() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard graceWindowTaskId != .invalid else { return }
+        resolvePendingCancelInvoke()
+        endGraceWindow()
+    }
+
+    /// Resolve the pending cancel invoke (if any), which makes Rust stop the
+    /// service with `PlatformExpiration`.
+    private func resolvePendingCancelInvoke() {
+        if let invoke = pendingCancelInvoke {
+            invoke.resolve()
+            pendingCancelInvoke = nil
+        }
+    }
+
+    /// Close the grace window, if open: invalidate the timer and end the UIKit
+    /// background task. Idempotent.
+    private func endGraceWindow() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        graceWindowTimer?.invalidate()
+        graceWindowTimer = nil
+        guard graceWindowTaskId != .invalid else { return }
+        let taskId = graceWindowTaskId
+        graceWindowTaskId = .invalid
+        backgroundTime.endBackgroundTask(taskId)
     }
 
     // MARK: - Scheduling

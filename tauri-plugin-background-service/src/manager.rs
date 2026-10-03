@@ -324,14 +324,38 @@ impl<R: Runtime> ServiceManagerHandle<R> {
     ///
     /// Sends a `Start` command to the actor. Returns `AlreadyRunning` if a
     /// service is already active.
+    ///
+    /// On iOS this also wires the service to its lifecycle, exactly as the
+    /// `start` command does: the `completeBgTask` callback goes to the actor
+    /// before `Start` (which takes it at spawn time), and the cancel listener
+    /// starts once `Start` succeeds. Without the listener, nothing on the
+    /// Swift side can stop the service — not a BGTask expiration, not the
+    /// background grace window — so a host starting from Rust would have its
+    /// service frozen by the suspension instead of stopped.
     pub async fn start(&self, app: AppHandle<R>, config: StartConfig) -> Result<(), ServiceError> {
+        crate::ios_set_on_complete_callback(&app)
+            .await
+            .map_err(ServiceError::Runtime)?;
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
-            .send(ManagerCommand::Start { config, reply, app })
+            .send(ManagerCommand::Start {
+                config,
+                reply,
+                app: app.clone(),
+            })
             .await
             .map_err(|_| ServiceError::Runtime("manager actor shut down".into()))?;
         rx.await
-            .map_err(|_| ServiceError::Runtime("manager actor dropped reply".into()))?
+            .map_err(|_| ServiceError::Runtime("manager actor dropped reply".into()))??;
+        #[cfg(target_os = "ios")]
+        {
+            use tauri::Manager;
+            let timeout_secs = app
+                .state::<crate::models::PluginConfig>()
+                .ios_cancel_listener_timeout_secs;
+            crate::ios_spawn_cancel_listener(&app, timeout_secs);
+        }
+        Ok(())
     }
 
     /// Stop the running background service.

@@ -327,7 +327,7 @@ iOS background execution is **best-effort scheduled execution**. The plugin uses
 </array>
 ```
 
-While the app is foregrounded, your `run()` loop executes continuously. When backgrounded, Tokio freezes after ~30 seconds. Design your service to handle intermittent execution windows gracefully.
+While the app is foregrounded, your `run()` loop executes continuously. When the app is backgrounded, the plugin holds a UIKit background task for the remaining grace period (~30 seconds) and stops the service with `platformExpiration` a few seconds before iOS suspends the app, so your service sees cancellation and the `stopped` event (and the `notifyOnTimeout` notification) fires instead of the process freezing silently. Design your service to handle intermittent execution windows gracefully.
 
 ### Desktop (Windows, macOS, Linux)
 

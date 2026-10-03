@@ -166,7 +166,7 @@ adb shell am start -a android.settings.APP_NOTIFICATION_SETTINGS \
 
 **Symptom:** The service starts successfully, but iOS terminates it around 28-30 seconds after the app enters the background.
 
-**Root cause:** This is expected iOS behavior. iOS grants background execution time in short bursts (typically 30 seconds) via `BGAppRefreshTask`. The plugin uses a safety timer (default: 28 seconds) to complete the task gracefully before iOS kills it.
+**Root cause:** This is expected iOS behavior. iOS grants background execution time in short bursts (typically 30 seconds) via `BGAppRefreshTask`. The plugin uses a safety timer (default: 28 seconds) to complete the task gracefully before iOS kills it. A service already running when the app is backgrounded is stopped with `platformExpiration` about 5 seconds before its [grace window](./ios.md#background-grace-window) runs out.
 
 **Solution:**
 

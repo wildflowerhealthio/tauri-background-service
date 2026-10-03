@@ -134,7 +134,9 @@ tauri::ios_plugin_binding!(init_plugin_background_service);
 /// Sends `SetOnComplete` to the actor. Must be called **before** `Start` because
 /// `handle_start` captures the callback via `take()` at spawn time.
 #[cfg(target_os = "ios")]
-async fn ios_set_on_complete_callback<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+pub(crate) async fn ios_set_on_complete_callback<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
     let mobile = app.state::<Arc<MobileLifecycle<R>>>();
     let mobile_handle = mobile.handle.clone();
     let manager = app.state::<ServiceManagerHandle<R>>();
@@ -154,7 +156,9 @@ async fn ios_set_on_complete_callback<R: Runtime>(app: &AppHandle<R>) -> Result<
 }
 
 #[cfg(not(target_os = "ios"))]
-async fn ios_set_on_complete_callback<R: Runtime>(_app: &AppHandle<R>) -> Result<(), String> {
+pub(crate) async fn ios_set_on_complete_callback<R: Runtime>(
+    _app: &AppHandle<R>,
+) -> Result<(), String> {
     Ok(())
 }
 
@@ -219,7 +223,7 @@ async fn run_cancel_listener<R: Runtime>(
 }
 
 #[cfg(target_os = "ios")]
-fn ios_spawn_cancel_listener<R: Runtime>(app: &AppHandle<R>, timeout_secs: u64) {
+pub(crate) fn ios_spawn_cancel_listener<R: Runtime>(app: &AppHandle<R>, timeout_secs: u64) {
     let mobile = app.state::<Arc<MobileLifecycle<R>>>();
     let mobile_handle = mobile.handle.clone();
     let mobile_handle_for_cancel = mobile.handle.clone();
@@ -243,9 +247,6 @@ fn ios_spawn_cancel_listener<R: Runtime>(app: &AppHandle<R>, timeout_secs: u64) 
         let _ = run_cancel_listener(wait_fn, cancel_fn, cmd_tx, timeout_secs).await;
     });
 }
-
-#[cfg(not(target_os = "ios"))]
-fn ios_spawn_cancel_listener<R: Runtime>(_app: &AppHandle<R>, _timeout_secs: u64) {}
 
 /// Spawn the iOS **cold BGTask auto-start** probe after plugin setup returns.
 ///
@@ -733,34 +734,14 @@ async fn start<R: Runtime>(app: AppHandle<R>, config: StartConfig) -> Result<(),
             .map_err(|e| e.to_string());
     }
 
-    // In-process mode (default).
-    // iOS: send SetOnComplete before Start so the callback is captured at spawn time.
-    ios_set_on_complete_callback(&app).await?;
-
-    // Mobile keepalive is now handled by the actor (Step 5).
-    // The actor calls start_keepalive AFTER the AlreadyRunning check.
-
-    let manager = app.state::<ServiceManagerHandle<R>>();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    manager
-        .cmd_tx
-        .send(ManagerCommand::Start {
-            config,
-            reply: tx,
-            app: app.clone(),
-        })
+    // In-process mode (default): the same start as the Rust API's
+    // `ServiceManagerHandle::start`, iOS lifecycle wiring included.
+    // Mobile keepalive is handled by the actor (Step 5), which calls
+    // start_keepalive AFTER the AlreadyRunning check.
+    app.state::<ServiceManagerHandle<R>>()
+        .start(app.clone(), config)
         .await
-        .map_err(|e| e.to_string())?;
-
-    rx.await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
-
-    // iOS: spawn cancel listener after Start succeeds.
-    let plugin_config = app.state::<PluginConfig>();
-    ios_spawn_cancel_listener(&app, plugin_config.ios_cancel_listener_timeout_secs);
-
-    Ok(())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
