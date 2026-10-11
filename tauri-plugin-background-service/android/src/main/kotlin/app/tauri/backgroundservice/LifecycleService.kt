@@ -66,6 +66,13 @@ class LifecycleService : Service() {
         @VisibleForTesting
         internal var coreStopExecutor: (String, () -> Unit) -> Unit = DEFAULT_CORE_STOP_EXECUTOR
 
+        // The onStartCommand return for a successful start of [serviceType].
+        // A `shortService` is NOT_STICKY: Android forbids starting one from
+        // the background, so an OS sticky restart after a process kill would
+        // throw ForegroundServiceStartNotAllowedException.
+        fun stickyModeFor(serviceType: String): Int =
+            if (serviceType == "shortService") Service.START_NOT_STICKY else Service.START_STICKY
+
         fun buildStartState(label: String, serviceType: String, previous: DurableState): DurableState {
             return previous.copy(
                 desiredRunning = true,
@@ -269,7 +276,7 @@ class LifecycleService : Service() {
             }
         }
 
-        return START_STICKY
+        return stickyModeFor(serviceType)
     }
 
     override fun onDestroy() {
@@ -407,7 +414,7 @@ class LifecycleService : Service() {
             }
         }
 
-        return START_STICKY
+        return stickyModeFor(serviceType)
     }
 
     /**

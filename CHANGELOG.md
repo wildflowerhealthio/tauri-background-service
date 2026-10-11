@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hold no Rust runtime — still fail as before, as do call actions,
   notification actions and the network nudge. A core that loads but reports
   `ok=false` still fails the start.
+- **Android:** a `shortService` foreground service is no longer
+  sticky-restarted. `onStartCommand` returns `START_NOT_STICKY` for that type,
+  since Android forbids starting a `shortService` from the background and the
+  OS restart after a process kill would throw
+  `ForegroundServiceStartNotAllowedException`.
 
 ## [1.0.1] - 2026-07-21
 

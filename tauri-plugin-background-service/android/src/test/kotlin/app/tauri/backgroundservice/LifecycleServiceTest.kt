@@ -779,6 +779,19 @@ class LifecycleServiceTest {
         assertEquals(30_000L, LifecycleService.RESTART_TIMEOUT_MS)
     }
 
+    // ── stickyModeFor ───────────────────────────────────────────────────
+
+    @Test
+    fun stickyModeFor_shortService_isNotSticky() {
+        assertEquals(android.app.Service.START_NOT_STICKY, LifecycleService.stickyModeFor("shortService"))
+    }
+
+    @Test
+    fun stickyModeFor_otherTypes_areSticky() {
+        assertEquals(android.app.Service.START_STICKY, LifecycleService.stickyModeFor("dataSync"))
+        assertEquals(android.app.Service.START_STICKY, LifecycleService.stickyModeFor("remoteMessaging"))
+    }
+
     // ── DurableState integration: buildStartState ──────────────────────
 
     @Test
