@@ -20,6 +20,7 @@ final class ForegroundRingGateTests: XCTestCase {
         plugin = BackgroundServicePlugin()
         // Avoid touching the real BGTaskScheduler if any path reaches it.
         plugin.scheduler = FakeBGTaskScheduler()
+        plugin.registerTaskHandlers()
     }
 
     override func tearDown() {

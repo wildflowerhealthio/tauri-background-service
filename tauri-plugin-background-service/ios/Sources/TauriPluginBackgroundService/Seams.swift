@@ -4,6 +4,7 @@
 
 import Foundation
 import BackgroundTasks
+import UIKit
 import UserNotifications
 
 /// Test seams for the iOS background-service plugin (Wave 0 / H12).
@@ -127,5 +128,47 @@ final class SystemNotificationCenter: NotificationCenterScheduling {
 
     func setNotificationCategories(_ categories: Set<UNNotificationCategory>) {
         UNUserNotificationCenter.current().setNotificationCategories(categories)
+    }
+}
+
+// MARK: - UIKit background-task seam (grace window)
+
+/// The `UIApplication` background-execution capabilities the plugin's grace
+/// window needs: begin/end a UIKit background task and read the remaining
+/// background budget. Production wires this to `SystemBackgroundTimeProvider`;
+/// XCTest injects a recording fake so the grace window's begin/end pairing and
+/// expiration path are provable without a real app lifecycle.
+protocol BackgroundTimeProviding: AnyObject {
+    /// Seconds of background execution left, as `UIApplication.backgroundTimeRemaining`
+    /// reports it (`.greatestFiniteMagnitude` while the app is still active).
+    var backgroundTimeRemaining: TimeInterval { get }
+
+    /// Begin a UIKit background task. `expirationHandler` runs on the main
+    /// thread shortly before the budget runs out and must end the task.
+    func beginBackgroundTask(
+        withName name: String?,
+        expirationHandler: (() -> Void)?
+    ) -> UIBackgroundTaskIdentifier
+
+    /// End a background task previously returned by `beginBackgroundTask`.
+    func endBackgroundTask(_ identifier: UIBackgroundTaskIdentifier)
+}
+
+/// Real seam implementation forwarding to `UIApplication.shared` — the
+/// production default. Behavior is identical to calling it directly.
+final class SystemBackgroundTimeProvider: BackgroundTimeProviding {
+    var backgroundTimeRemaining: TimeInterval {
+        UIApplication.shared.backgroundTimeRemaining
+    }
+
+    func beginBackgroundTask(
+        withName name: String?,
+        expirationHandler: (() -> Void)?
+    ) -> UIBackgroundTaskIdentifier {
+        UIApplication.shared.beginBackgroundTask(withName: name, expirationHandler: expirationHandler)
+    }
+
+    func endBackgroundTask(_ identifier: UIBackgroundTaskIdentifier) {
+        UIApplication.shared.endBackgroundTask(identifier)
     }
 }

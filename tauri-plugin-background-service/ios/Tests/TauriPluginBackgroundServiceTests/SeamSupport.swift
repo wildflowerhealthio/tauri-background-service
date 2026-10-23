@@ -1,5 +1,6 @@
 import Foundation
 import BackgroundTasks
+import UIKit
 import UserNotifications
 import Tauri
 @testable import tauri_plugin_background_service
@@ -181,6 +182,51 @@ final class FakeNotificationCenter: NotificationCenterScheduling {
     func setNotificationCategories(_ categories: Set<UNNotificationCategory>) {
         setCategoriesCount += 1
         lastCategories = categories
+    }
+}
+
+// MARK: - FakeBackgroundTimeProvider (grace window)
+
+/// Recording fake for the `BackgroundTimeProviding` seam: mints distinct task
+/// identifiers, records every begin/end, keeps the latest expiration handler so a
+/// test can simulate iOS expiring the task, and reports a configurable
+/// `backgroundTimeRemaining`.
+final class FakeBackgroundTimeProvider: BackgroundTimeProviding {
+    var backgroundTimeRemaining: TimeInterval = 30
+    /// When set, `beginBackgroundTask` returns `.invalid` (iOS refused).
+    var refuseBegin = false
+
+    private(set) var begun: [UIBackgroundTaskIdentifier] = []
+    private(set) var ended: [UIBackgroundTaskIdentifier] = []
+    private(set) var lastName: String?
+    private var expirationHandler: (() -> Void)?
+    private var nextRawId = 1
+
+    /// Tasks begun but not yet ended.
+    var openTasks: [UIBackgroundTaskIdentifier] {
+        begun.filter { !ended.contains($0) }
+    }
+
+    func beginBackgroundTask(
+        withName name: String?,
+        expirationHandler: (() -> Void)?
+    ) -> UIBackgroundTaskIdentifier {
+        if refuseBegin { return .invalid }
+        let id = UIBackgroundTaskIdentifier(rawValue: nextRawId)
+        nextRawId += 1
+        begun.append(id)
+        lastName = name
+        self.expirationHandler = expirationHandler
+        return id
+    }
+
+    func endBackgroundTask(_ identifier: UIBackgroundTaskIdentifier) {
+        ended.append(identifier)
+    }
+
+    /// Simulate iOS running the most recent task's expiration handler.
+    func expire() {
+        expirationHandler?()
     }
 }
 

@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **iOS:** the app no longer aborts when a start reaches `scheduleNext()`
+  before the BGTask handlers are registered. The handlers were registered in
+  `load(webview:)`, which Tauri defers until the webview exists, so a cold
+  auto-start for a pending BGTask could submit first —
+  `BGTaskScheduler.submit` raises for an unregistered identifier. The
+  handlers are now registered when Tauri builds the plugin, and
+  `scheduleNext()` skips (and reports in `lastScheduleError`) any identifier
+  whose registration did not succeed.
+- **iOS:** a BGTask expiration no longer crashes the app. iOS calls the
+  expiration handler on a background queue, and `handleExpiration()` asserts
+  the main queue; the handler now hops onto `.main` first.
+- **iOS:** `ServiceManagerHandle::start` (the Rust API) now wires the
+  service to the iOS lifecycle the same way the `start` command does — the
+  `completeBgTask` callback before `Start`, the cancel listener after it.
+  Before, a service started from Rust had no cancel listener, so neither a
+  BGTask expiration nor the background grace window could stop it.
 - **Android:** the foreground service now runs without a host native core.
   When `HeadlessBridge.nativeLibName` cannot be loaded, a start made by the
   plugin itself (`manual_start`) is accepted as lifecycle-only
@@ -18,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hold no Rust runtime — still fail as before, as do call actions,
   notification actions and the network nudge. A core that loads but reports
   `ok=false` still fails the start.
+- **iOS:** A service running in-process when the app is backgrounded is now
+  stopped gracefully with `platformExpiration` before iOS suspends the app.
+  The plugin holds a UIKit background task (grace window) and resolves the
+  cancel listener 5 seconds before the background budget runs out, so the
+  `stopped` event and the `notifyOnTimeout` notification fire instead of the
+  service freezing silently. The grace window ends on foreground return,
+  `stopService()`, service completion, or a BGTask launch.
 - **Android:** a `shortService` foreground service is no longer
   sticky-restarted. `onStartCommand` returns `START_NOT_STICKY` for that type,
   since Android forbids starting a `shortService` from the background and the

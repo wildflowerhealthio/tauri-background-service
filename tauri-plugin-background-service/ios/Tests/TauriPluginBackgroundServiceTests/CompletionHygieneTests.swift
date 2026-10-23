@@ -18,6 +18,7 @@ final class CompletionHygieneTests: XCTestCase {
         plugin = BackgroundServicePlugin()
         scheduler = FakeBGTaskScheduler()
         plugin.scheduler = scheduler
+        plugin.registerTaskHandlers()
         // IOS-CLEAN-01: isolate persistence so this class cannot leak state
         // into `.standard` or another class's suite. `clearKeys()` previously
         // cleared only a subset; `TestDefaults.clearAll(on:)` clears the
