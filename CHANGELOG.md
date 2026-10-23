@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **iOS:** the app no longer aborts when a start reaches `scheduleNext()`
+  before the BGTask handlers are registered. The handlers were registered in
+  `load(webview:)`, which Tauri defers until the webview exists, so a cold
+  auto-start for a pending BGTask could submit first —
+  `BGTaskScheduler.submit` raises for an unregistered identifier. The
+  handlers are now registered when Tauri builds the plugin, and
+  `scheduleNext()` skips (and reports in `lastScheduleError`) any identifier
+  whose registration did not succeed.
+- **iOS:** a BGTask expiration no longer crashes the app. iOS calls the
+  expiration handler on a background queue, and `handleExpiration()` asserts
+  the main queue; the handler now hops onto `.main` first.
 - **iOS:** `ServiceManagerHandle::start` (the Rust API) now wires the
   service to the iOS lifecycle the same way the `start` command does — the
   `completeBgTask` callback before `Start`, the cancel listener after it.

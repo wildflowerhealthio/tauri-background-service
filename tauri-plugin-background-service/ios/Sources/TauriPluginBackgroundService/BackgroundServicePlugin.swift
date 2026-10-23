@@ -147,6 +147,14 @@ import Tauri
         currentRefreshTask != nil || currentProcessingTask != nil || injectedActiveTask != nil
     }
 
+    /// The BGTask identifiers whose launch handler `registerTaskHandlers()`
+    /// registered. `BGTaskScheduler.submit` raises an uncatchable
+    /// `NSInternalInconsistencyException` for an identifier with no registered
+    /// handler, so `scheduleNext()` submits only identifiers in this set. `nil`
+    /// until `registerTaskHandlers()` has run, so a second call cannot register
+    /// twice (which `BGTaskScheduler.register` also rejects with an exception).
+    private(set) var registeredTaskIds: Set<String>?
+
     /// Pending cancel invoke — shared between both task types since iOS runs at most one.
     private var pendingCancelInvoke: Invoke?
 
@@ -346,18 +354,16 @@ import Tauri
         defaults.set(nil, forKey: PendingTaskKeys.consumedAt)
     }
 
-    // MARK: - Plugin Lifecycle
+    // MARK: - BGTask Registration
 
-    public override func load(webview: WKWebView) {
-        super.load(webview: webview)
-
-        // M4: notification authorization is NOT requested here. Prompting at plugin
-        // load — before any user intent — hurts App Store optics and couples the
-        // permission to load rather than the feature that needs it. The request is
-        // deferred to the first notification-requiring intent (service start) via
-        // `requestNotificationAuthorizationIfNeeded()`.
-
-        // Register both BGTask handlers before the app finishes launching.
+    /// Register both BGTask launch handlers. iOS requires this early in launch,
+    /// so the `init_plugin_background_service` entry point calls it when Tauri
+    /// builds the plugin during setup. It must not wait for `load(webview:)`:
+    /// Tauri defers that until the webview exists, and the Rust cold auto-start
+    /// can call `startKeepalive` before then — submitting for an unregistered
+    /// identifier aborts the app. Runs once; later calls are no-ops.
+    func registerTaskHandlers() {
+        guard registeredTaskIds == nil else { return }
         let refreshId = refreshTaskId
         let processingId = processingTaskId
 
@@ -393,6 +399,22 @@ import Tauri
             logger.error("\(msg, privacy: .public)")
             self.defaults.set(msg, forKey: DesiredStateKeys.lastScheduleError)
         }
+        var registered = Set<String>()
+        if refreshRegistered { registered.insert(refreshId) }
+        if processingRegistered { registered.insert(processingId) }
+        registeredTaskIds = registered
+    }
+
+    // MARK: - Plugin Lifecycle
+
+    public override func load(webview: WKWebView) {
+        super.load(webview: webview)
+
+        // M4: notification authorization is NOT requested here. Prompting at plugin
+        // load — before any user intent — hurts App Store optics and couples the
+        // permission to load rather than the feature that needs it. The request is
+        // deferred to the first notification-requiring intent (service start) via
+        // `requestNotificationAuthorizationIfNeeded()`.
 
         // Foreground/background transition observers.
         // When going to background with desired_running=true and no active BGTask,
@@ -646,9 +668,7 @@ import Tauri
         // rather than only persisting pending and waiting.
         resolvePendingWarmInvoke()
 
-        task.expirationHandler = { [weak self] in
-            self?.handleExpiration()
-        }
+        task.expirationHandler = expirationHandler()
 
         // Always start safety timer for refresh tasks (default: 28s)
         startSafetyTimer(with: safetyTimeout)
@@ -675,9 +695,7 @@ import Tauri
         // rather than only persisting pending and waiting.
         resolvePendingWarmInvoke()
 
-        task.expirationHandler = { [weak self] in
-            self?.handleExpiration()
-        }
+        task.expirationHandler = expirationHandler()
 
         // Only start safety timer for processing tasks if an explicit timeout was configured
         if let timeout = processingSafetyTimeoutSecs, timeout > 0 {
@@ -686,6 +704,18 @@ import Tauri
     }
 
     // MARK: - Expiration Handler (signals Rust to cancel)
+
+    /// The `BGTask.expirationHandler` for a run. iOS calls it on a background
+    /// queue — `register(using: .main)` covers only the launch handler — while
+    /// `handleExpiration()` reads and writes the main-confined task state, so
+    /// the handler hops onto `.main` first.
+    func expirationHandler() -> () -> Void {
+        return { [weak self] in
+            DispatchQueue.main.async {
+                self?.handleExpiration()
+            }
+        }
+    }
 
     func handleExpiration() {
         dispatchPrecondition(condition: .onQueue(.main))
@@ -1584,6 +1614,18 @@ import Tauri
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "app.tauri.backgroundservice", category: "BGTaskScheduler")
 
+    /// Submit `request` only if its identifier's launch handler is registered.
+    /// `BGTaskScheduler.submit` aborts the app (an Objective-C assertion, not a
+    /// thrown error) for an unregistered identifier — before
+    /// `registerTaskHandlers()` has run, or when registration failed — so the
+    /// gap becomes a scheduling error instead.
+    private func submitRegistered(_ request: BGTaskRequest) throws {
+        guard registeredTaskIds?.contains(request.identifier) == true else {
+            throw UnregisteredTaskError(identifier: request.identifier)
+        }
+        try scheduler.submit(request)
+    }
+
     @discardableResult
     private func scheduleNext() -> SchedulingResult {
         var refreshScheduled = false
@@ -1603,7 +1645,7 @@ import Tauri
         let refreshReq = BGAppRefreshTaskRequest(identifier: refreshTaskId)
         refreshReq.earliestBeginDate = Date(timeIntervalSinceNow: earliestRefreshBeginMinutes * 60)
         do {
-            try scheduler.submit(refreshReq)
+            try submitRegistered(refreshReq)
             refreshScheduled = true
         } catch {
             refreshError = error.localizedDescription
@@ -1639,7 +1681,7 @@ import Tauri
         processingReq.requiresExternalPower = requiresExternalPower
         processingReq.requiresNetworkConnectivity = requiresNetworkConnectivity
         do {
-            try scheduler.submit(processingReq)
+            try submitRegistered(processingReq)
             processingScheduled = true
         } catch {
             processingError = error.localizedDescription
@@ -1664,14 +1706,30 @@ import Tauri
     }
 }
 
+/// `scheduleNext()` skipped a submit because the identifier has no registered
+/// launch handler (see `BackgroundServicePlugin.submitRegistered`).
+struct UnregisteredTaskError: LocalizedError {
+    let identifier: String
+
+    var errorDescription: String? {
+        "BGTask handler not registered for '\(identifier)'"
+    }
+}
+
 // Tauri iOS plugin entry point. The Rust side's
 // `tauri::ios_plugin_binding!(init_plugin_background_service)` expands to a
 // `swift_rs::swift!` extern over this `@_cdecl` symbol; without it the iOS link
 // fails with `Undefined symbols: _init_plugin_background_service`. Mirrors the
 // official `tauri-plugin-notification` registration pattern.
+//
+// Tauri calls this during plugin setup, before any command can reach the
+// plugin, so the BGTask launch handlers are registered here rather than in
+// `load(webview:)`.
 @_cdecl("init_plugin_background_service")
 public func initPlugin() -> Plugin {
-    return BackgroundServicePlugin()
+    let plugin = BackgroundServicePlugin()
+    plugin.registerTaskHandlers()
+    return plugin
 }
 
 /// Loosely-typed args accessor backporting the pre-2.9 `invoke.args(as: [String: Any].self)`

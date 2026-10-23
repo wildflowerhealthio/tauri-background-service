@@ -25,6 +25,7 @@ final class GraceWindowTests: XCTestCase {
         backgroundTime = FakeBackgroundTimeProvider()
         plugin = BackgroundServicePlugin()
         plugin.scheduler = FakeBGTaskScheduler()
+        plugin.registerTaskHandlers()
         plugin.notificationAuthorizer = FakeNotificationAuthorizer()
         plugin.backgroundTime = backgroundTime
         plugin.defaults = suite

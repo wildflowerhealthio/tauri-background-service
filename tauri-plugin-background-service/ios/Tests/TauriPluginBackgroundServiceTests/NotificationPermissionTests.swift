@@ -29,6 +29,7 @@ final class NotificationPermissionTests: XCTestCase {
         scheduler = FakeBGTaskScheduler()
         authorizer = FakeNotificationAuthorizer()
         plugin.scheduler = scheduler
+        plugin.registerTaskHandlers()
         plugin.notificationAuthorizer = authorizer
         // IOS-CLEAN-01: isolated suite so this class cannot leak state.
         suite = TestDefaults.makeIsolatedSuite()

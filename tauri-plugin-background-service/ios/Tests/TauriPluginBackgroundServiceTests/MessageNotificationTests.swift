@@ -43,6 +43,7 @@ final class MessageNotificationTests: XCTestCase {
         // Keep the BGTaskScheduler seam no-op too so nothing reaches the real
         // scheduler if a path accidentally submits.
         plugin.scheduler = FakeBGTaskScheduler()
+        plugin.registerTaskHandlers()
         suite = TestDefaults.makeIsolatedSuite()
         plugin.defaults = suite
         TestDefaults.clearAll(on: suite)

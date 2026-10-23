@@ -1,5 +1,4 @@
 import XCTest
-import WebKit
 import BackgroundTasks
 @testable import tauri_plugin_background_service
 
@@ -38,14 +37,14 @@ final class SchedulingRegistrationAndClampsTests: XCTestCase {
     /// aggregate `lastScheduleError` so `getDesiredStateStatus` surfaces it
     /// (Rust reads this through the handler). Pre-fix the Bool was discarded
     /// and the host saw only a silent scheduling failure later.
-    func testLoad_refreshRegistrationFailure_persistsScheduleError() {
+    func testRegister_refreshRegistrationFailure_persistsScheduleError() {
         let bid = Bundle.main.bundleIdentifier ?? "app"
         scheduler.registerResults = [
             "\(bid).bg-refresh": false,
             "\(bid).bg-processing": true,
         ]
 
-        plugin.load(webview: WKWebView())
+        plugin.registerTaskHandlers()
 
         let error = suite.string(forKey: "ios_last_schedule_error")
         XCTAssertNotNil(error, "refresh register=false must persist lastScheduleError")
@@ -53,26 +52,73 @@ final class SchedulingRegistrationAndClampsTests: XCTestCase {
                       "error names the failed registration: \(error ?? "nil")")
     }
 
-    func testLoad_processingRegistrationFailure_persistsScheduleError() {
+    func testRegister_processingRegistrationFailure_persistsScheduleError() {
         let bid = Bundle.main.bundleIdentifier ?? "app"
         scheduler.registerResults = [
             "\(bid).bg-refresh": true,
             "\(bid).bg-processing": false,
         ]
 
-        plugin.load(webview: WKWebView())
+        plugin.registerTaskHandlers()
 
         let error = suite.string(forKey: "ios_last_schedule_error")
         XCTAssertNotNil(error, "processing register=false must persist lastScheduleError")
         XCTAssertTrue(error?.contains("register failed") ?? false)
     }
 
-    func testLoad_successfulRegistration_clearsNoError() {
+    func testRegister_successfulRegistration_clearsNoError() {
         // Both registrations succeed → no error persisted.
-        plugin.load(webview: WKWebView())
+        plugin.registerTaskHandlers()
 
         XCTAssertNil(suite.string(forKey: "ios_last_schedule_error"),
                      "successful registration writes no error")
+    }
+
+    func testRegister_twice_registersEachIdentifierOnce() {
+        // `BGTaskScheduler.register` raises for an identifier registered twice.
+        plugin.registerTaskHandlers()
+        plugin.registerTaskHandlers()
+
+        let bid = Bundle.main.bundleIdentifier ?? "app"
+        XCTAssertEqual(scheduler.registered, ["\(bid).bg-refresh", "\(bid).bg-processing"],
+                       "each identifier is registered exactly once")
+    }
+
+    // MARK: - nothing is submitted for an unregistered identifier
+
+    /// The TestFlight crash: the Rust cold auto-start called `startKeepalive`
+    /// before the handlers were registered, and `BGTaskScheduler.submit` aborts
+    /// the app for an unregistered identifier. Before registration the start
+    /// submits nothing and reports the scheduler unavailable.
+    func testStartKeepalive_beforeRegistration_submitsNothing() {
+        let capture = InvokeCapture()
+        plugin.startKeepalive(capture.makeInvoke(args: "{}"))
+
+        XCTAssertTrue(scheduler.submitted.isEmpty,
+                      "no request reaches BGTaskScheduler.submit before registration")
+        XCTAssertEqual(capture.rejectCount, 1, "both submits skipped → schedulerUnavailable")
+        let error = suite.string(forKey: "ios_last_schedule_error")
+        XCTAssertTrue(error?.contains("not registered") ?? false,
+                      "the skipped submit is recorded: \(error ?? "nil")")
+    }
+
+    /// A failed registration (identifier missing from
+    /// `BGTaskSchedulerPermittedIdentifiers`) leaves that identifier
+    /// unsubmittable; the registered one is still scheduled.
+    func testStartKeepalive_refreshRegistrationFailed_submitsOnlyProcessing() {
+        let bid = Bundle.main.bundleIdentifier ?? "app"
+        scheduler.registerResults = [
+            "\(bid).bg-refresh": false,
+            "\(bid).bg-processing": true,
+        ]
+        plugin.registerTaskHandlers()
+
+        let capture = InvokeCapture()
+        plugin.startKeepalive(capture.makeInvoke(args: "{}"))
+
+        XCTAssertEqual(scheduler.submitted.map(\.identifier), ["\(bid).bg-processing"],
+                       "only the registered identifier is submitted")
+        XCTAssertEqual(capture.resolveCount, 1, "one scheduled request is enough to start")
     }
 
     // MARK: - numeric clamps (pure static helpers)
@@ -144,6 +190,7 @@ final class SchedulingRegistrationAndClampsTests: XCTestCase {
     /// (which `BGTaskScheduler.submit` rejects). Observed through the fake
     /// scheduler's recorded request.
     func testStartKeepalive_clampsNegativeEarliestRefreshBeginMinutes() {
+        plugin.registerTaskHandlers()
         let capture = InvokeCapture()
         plugin.startKeepalive(capture.makeInvoke(
             args: "{\"iosEarliestRefreshBeginMinutes\":-10.0}"))
@@ -165,6 +212,7 @@ final class SchedulingRegistrationAndClampsTests: XCTestCase {
     /// proves the plugin wires `startKeepalive` through it (observable via the
     /// processing request's earliestBeginDate not being NaN/∞).
     func testStartKeepalive_clampsNonFiniteMultiplierSoProcessingScheduleIsFinite() {
+        plugin.registerTaskHandlers()
         let capture = InvokeCapture()
         plugin.startKeepalive(capture.makeInvoke(
             args: "{\"iosProcessingCeilingMultiplier\":1.7976931348623157e308}"))

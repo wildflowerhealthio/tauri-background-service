@@ -14,16 +14,20 @@ iOS background execution is fundamentally different from Android: the OS control
 ### Architecture
 
 ```
+Plugin setup (app launch):
+  → init_plugin_background_service()
+    → BGTaskScheduler.shared.register() for both identifiers
+
 JS: startService()
   → Tauri Command (start)
     → Actor: handle_start()
       → MobileLifecycle.start_keepalive()
         → BackgroundServicePlugin.startKeepalive()
-          → BGTaskScheduler.shared.register() for both identifiers
           → scheduleNext() submits both BGAppRefreshTaskRequest + BGProcessingTaskRequest
+            (only identifiers whose registration succeeded)
 
 iOS calls handleBackgroundTask() or handleProcessingTask():
-  → Sets expiration handler
+  → Sets expiration handler (hops onto the main queue when iOS fires it)
   → Starts safety timer (BGAppRefresh: 28.0s default, BGProcessing: configurable)
   → Stores BGTask reference
   → Rust runs service.run() in background

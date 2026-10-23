@@ -23,6 +23,7 @@ final class MainSerializationTests: XCTestCase {
         plugin = BackgroundServicePlugin()
         scheduler = FakeBGTaskScheduler()
         plugin.scheduler = scheduler
+        plugin.registerTaskHandlers()
     }
 
     override func tearDown() {

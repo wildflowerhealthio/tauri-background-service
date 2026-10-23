@@ -24,6 +24,7 @@ final class StatusFactTests: XCTestCase {
         plugin = BackgroundServicePlugin()
         scheduler = FakeBGTaskScheduler()
         plugin.scheduler = scheduler
+        plugin.registerTaskHandlers()
         // IOS-CLEAN-01: isolated suite so this class cannot leak state.
         suite = TestDefaults.makeIsolatedSuite()
         plugin.defaults = suite

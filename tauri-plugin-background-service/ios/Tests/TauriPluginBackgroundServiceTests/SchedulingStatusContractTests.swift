@@ -18,6 +18,7 @@ final class SchedulingStatusContractTests: XCTestCase {
         plugin = BackgroundServicePlugin()
         scheduler = FakeBGTaskScheduler()
         plugin.scheduler = scheduler
+        plugin.registerTaskHandlers()
         // `startKeepalive` now requests notification authorization (M4); inject the
         // fake so the real `UNUserNotificationCenter.current()` isn't touched in the
         // test host (which has no app bundle).

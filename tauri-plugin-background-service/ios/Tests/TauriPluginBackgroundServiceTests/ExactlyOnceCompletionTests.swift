@@ -46,6 +46,7 @@ final class ExactlyOnceCompletionTests: XCTestCase {
     private func freshPlugin() -> BackgroundServicePlugin {
         let p = BackgroundServicePlugin()
         p.scheduler = FakeBGTaskScheduler()
+        p.registerTaskHandlers()
         p.notificationAuthorizer = FakeNotificationAuthorizer()
         p.defaults = suite
         return p
@@ -119,6 +120,33 @@ final class ExactlyOnceCompletionTests: XCTestCase {
         plugin.handleExpiration()
         XCTAssertEqual(fake.completionCount, 1,
                        "a safety-timer completion followed by an iOS expiration must not double-complete")
+    }
+
+    // MARK: - iOS expiration delivered off the main queue
+
+    /// iOS calls `BGTask.expirationHandler` on a background queue, while
+    /// `handleExpiration()` is main-confined (it asserts `.main`). The handler
+    /// the plugin installs must hop onto `.main` before handling the expiration;
+    /// calling it straight from the background queue crashed the TestFlight build.
+    func testExpirationHandler_firedOffMain_completesOnMainExactlyOnce() {
+        let fake = startActiveRun()
+        let handler = plugin.expirationHandler()
+
+        let fired = expectation(description: "expiration handler returned")
+        DispatchQueue(label: "bgtask.expiration").async {
+            handler()
+            fired.fulfill()
+        }
+        wait(for: [fired], timeout: 5.0)
+
+        // The hop is enqueued on `.main` before the handler returns; draining
+        // `.main` once runs it.
+        let drained = expectation(description: "main drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 5.0)
+
+        XCTAssertEqual(fake.completionCount, 1, "the off-main expiration completes the run once")
+        XCTAssertEqual(fake.lastSuccess, false, "an expired run completes with success=false")
     }
 
     // MARK: - Concurrent terminal paths from background queues complete once
