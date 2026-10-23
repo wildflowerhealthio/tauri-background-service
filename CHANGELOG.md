@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stopped` event and the `notifyOnTimeout` notification fire instead of the
   service freezing silently. The grace window ends on foreground return,
   `stopService()`, service completion, or a BGTask launch.
+- **Android:** a `shortService` foreground service is no longer
+  sticky-restarted. `onStartCommand` returns `START_NOT_STICKY` for that type,
+  since Android forbids starting a `shortService` from the background and the
+  OS restart after a process kill would throw
+  `ForegroundServiceStartNotAllowedException`.
 
 ## [1.0.1] - 2026-07-21
 
